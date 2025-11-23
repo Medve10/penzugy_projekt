@@ -1,0 +1,11 @@
+id,date,account,description,amount,direction,category
+1,2025-09-28,Main Bank,Invoice #INV-1001,250000,in,Sales
+2,2025-09-30,Main Bank,Office Rent,-120000,out,Rent
+3,2025-10-01,Main Bank,Payment to Supplier X,-80000,out,COGS
+4,2025-10-03,Main Bank,Invoice #INV-1002,175000,in,Sales
+5,2025-10-05,Cash,Taxi for client meeting,-8500,out,Travel
+6,2025-10-10,Main Bank,Payment from Client Y,90000,in,Sales
+7,2025-10-12,Main Bank,SaaS subscription - analytics,-19000,out,Software
+8,2025-10-13,Main Bank,Invoice #INV-1003,130000,in,Sales
+9,2025-10-14,Main Bank,Team lunch,-15000,out,Meals
+10,2025-10-16,Cash,Courier service,-6000,out,Logistics
