@@ -1,12 +1,42 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
+import json
 from datetime import date
 from pathlib import Path
 
 st.set_page_config(page_title="SMA PoC", page_icon="💸", layout="wide")
 
-# Session state
+BASE_DIR = Path(__file__).parent
+AUTH_FILE = BASE_DIR / "auth_state.json"
+
+# ----- Persistent auth helpers -----
+def load_persisted_auth():
+    if not AUTH_FILE.exists():
+        return None
+    try:
+        data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+        # minimal sanity check
+        if isinstance(data, dict) and "logged_in" in data:
+            return data
+    except Exception:
+        return None
+    return None
+
+def save_persisted_auth(auth_dict: dict):
+    try:
+        AUTH_FILE.write_text(json.dumps(auth_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass  # fail silently for demo
+
+def clear_persisted_auth():
+    try:
+        if AUTH_FILE.exists():
+            AUTH_FILE.unlink()
+    except Exception:
+        pass
+
+# ----- Session state -----
 if "auth" not in st.session_state:
     st.session_state.auth = {
         "logged_in": False,
@@ -15,18 +45,27 @@ if "auth" not in st.session_state:
         "role": None,
     }
 
+# try auto-login from persisted auth
+persisted = load_persisted_auth()
+if persisted and not st.session_state.auth.get("logged_in"):
+    st.session_state.auth = persisted
+
 AUTH = st.session_state.auth
 
-#Helper: loading transactions
+# RBAC helper
+def is_admin() -> bool:
+    return AUTH.get("role") == "admin"
+
+# Helper: loading transactions
 def load_transactions(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path, parse_dates=["date"])
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    # ha nincs invoice_no oszlop a CSV-ben, adjunk hozzá egy üreset (linkeléshez)
+    # if there is no invoice_no column in the CSV, add an empty one for linking
     if "invoice_no" not in df.columns:
         df["invoice_no"] = pd.NA
     return df
 
-#Helper: loading invoices
+# Helper: loading invoices
 def load_invoices(csv_path: Path) -> pd.DataFrame:
     df_i = pd.read_csv(csv_path)
 
@@ -47,7 +86,7 @@ def load_invoices(csv_path: Path) -> pd.DataFrame:
 
     return df_i
 
-#Helper: invoice status recalculation
+# Helper: invoice status recalculation
 def recompute_invoice_status(inv_row: pd.Series, tx: pd.DataFrame) -> str:
     gross = float(inv_row["gross"])
     ino = inv_row["invoice_no"]
@@ -59,11 +98,11 @@ def recompute_invoice_status(inv_row: pd.Series, tx: pd.DataFrame) -> str:
     return "issued"
 
 def auto_link_by_description(inv_no: str, tx: pd.DataFrame):
-    """Ha a tranzakció leírása tartalmazza a számlaszámot és bejövő, linkeld."""
+    """If transaction description contains the invoice number and is incoming, link it."""
     mask = (tx["direction"] == "in") & tx["description"].str.contains(inv_no, case=False, na=False)
     tx.loc[mask, "invoice_no"] = inv_no
 
-# --- Oldalsáv ---
+# --- Sidebar ---
 with st.sidebar:
     st.title("SMA PoC")
     if not AUTH["logged_in"]:
@@ -71,6 +110,7 @@ with st.sidebar:
         email = st.text_input("Email", value="admin@example.com")
         password = st.text_input("Password", type="password", value="admin")
         org = st.text_input("Organization", value="Demo Kft.")
+        remember = st.checkbox("Remember me", value=True)
         if st.button("Login"):
             if (email, password) in [("admin@example.com", "admin"), ("user@example.com", "user")]:
                 AUTH.update({
@@ -79,15 +119,23 @@ with st.sidebar:
                     "org": org,
                     "role": "admin" if email.startswith("admin@") else "user",
                 })
+                st.session_state.auth = AUTH
+                if remember:
+                    save_persisted_auth(AUTH)
+                else:
+                    clear_persisted_auth()
                 st.success("Successful login.")
             else:
                 st.error("Incorrect login")
     else:
-        st.caption(f"Logged in: {AUTH['email']} | Organization: {AUTH['org']}")
+        st.caption(
+            f"Logged in: {AUTH['email']} | Organization: {AUTH['org']} | Role: {AUTH.get('role')}"
+        )
         if st.button("Log out"):
             st.session_state.auth = {
                 "logged_in": False, "email": None, "org": None, "role": None
             }
+            clear_persisted_auth()
             st.experimental_rerun()
 
     st.markdown("---")
@@ -107,9 +155,9 @@ if not AUTH["logged_in"]:
     st.warning("Please log in to continue.")
     st.stop()
 
-# --- adat betöltés + session state ---
-data_path = Path(__file__).parent / "assets" / "transactions.csv"
-invoices_path = Path(__file__).parent / "assets" / "invoices.csv"
+# --- data loading + session state ---
+data_path = BASE_DIR / "assets" / "transactions.csv"
+invoices_path = BASE_DIR / "assets" / "invoices.csv"
 if "transactions" not in st.session_state:
     st.session_state["transactions"] = load_transactions(data_path)
 
@@ -125,12 +173,12 @@ if "invoices" not in st.session_state:
 df = st.session_state["transactions"]
 df_invoices = st.session_state["invoices"]
 
-# --- Oldalak ---
+# --- Pages ---
 if page == "Dashboard":
     st.header("Control panel")
     st.caption(f"Organization: {AUTH['org']} | User: {AUTH['email']}")
 
-    # KPI-k (aktuális hónap)
+    # KPIs (current month)
     today = df["date"].max().date() if not df.empty else pd.Timestamp.today().date()
     month_mask = (df["date"].dt.to_period("M") == pd.Timestamp(today).to_period("M"))
     m = df[month_mask]
@@ -158,7 +206,7 @@ if page == "Dashboard":
     monthly_out = (
         monthly.loc[monthly["direction"] == "out"]
         .groupby("month")["amount"].sum()
-        .mul(-1)  # itt csak az amount Series-t negáljuk
+        .mul(-1)  # only negate the amount Series
         .reset_index(name="expense")
     )
 
@@ -208,23 +256,33 @@ elif page == "Transactions":
     st.dataframe(filtered, use_container_width=True, hide_index=True)
 
     st.markdown("### Quick Categorization (demo)")
-    row_id = st.number_input("Transaction ID", min_value=1, step=1)
-    new_cat = st.selectbox("New Category", ["Sales","COGS","Rent","Travel","Software","Meals","Logistics"])
-    new_inv = st.text_input("Link to invoice (optional, e.g. INV-1002)", value="")
-    if st.button("Save (demo)"):
-        idx = df.index[df["id"] == int(row_id)]
-        if len(idx) == 0:
-            st.error("No such transaction ID.")
-        else:
-            df.loc[idx, "category"] = new_cat
-            inv_no = new_inv.strip().upper() or pd.NA
-            df.loc[idx, "invoice_no"] = inv_no
-            st.success(f"Set: id={int(row_id)} → category={new_cat}, invoice_no={inv_no} (demo only, not persisted)")
+
+    if is_admin():
+        row_id = st.number_input("Transaction ID", min_value=1, step=1)
+        new_cat = st.selectbox(
+            "New Category",
+            ["Sales","COGS","Rent","Travel","Software","Meals","Logistics"]
+        )
+        new_inv = st.text_input("Link to invoice (optional, e.g. INV-1002)", value="")
+        if st.button("Save (demo)"):
+            idx = df.index[df["id"] == int(row_id)]
+            if len(idx) == 0:
+                st.error("No such transaction ID.")
+            else:
+                df.loc[idx, "category"] = new_cat
+                inv_no = new_inv.strip().upper() or pd.NA
+                df.loc[idx, "invoice_no"] = inv_no
+                st.success(
+                    f"Set: id={int(row_id)} → category={new_cat}, invoice_no={inv_no} "
+                    "(demo only, not persisted)"
+                )
+    else:
+        st.info("You can view and filter transactions. Editing and linking is restricted to admin users.")
 
 elif page == "Invoices (Mock)":
     st.header("Invoices")
 
-    # szűrő státuszra
+    # status filter
     colf1, colf2 = st.columns([1,3])
     with colf1:
         status_filter = st.selectbox("Status", ["all","issued","overdue","paid"], index=0)
@@ -233,16 +291,13 @@ elif page == "Invoices (Mock)":
     if status_filter != "all":
         inv = inv[inv["status"] == status_filter]
 
-    # paid / due amount számítás a linkelt tranzakciók alapján
+    # paid / due amount calculation based on linked transactions
     paid_sum = []
     for _, r in inv.iterrows():
         s = df[(df["invoice_no"] == r["invoice_no"]) & (df["direction"] == "in")]["amount"].sum()
         paid_sum.append(float(s))
 
-    # Először csak paid_amount
     inv["paid_amount"] = paid_sum
-
-    # Majd erre hivatkozva számoljuk a due_amount-ot
     inv["due_amount"] = (inv["gross"] - inv["paid_amount"]).clip(lower=0.0)
 
     st.dataframe(
@@ -265,7 +320,7 @@ elif page == "Invoices (Mock)":
         st.write("Gross amount:", f"{float(row['gross']):,.0f} HUF")
         st.write("Current status:", row["status"])
 
-        # linkelt tranzakciók
+        # linked transactions
         linked = df[df["invoice_no"] == selected_inv]
         st.markdown("**Linked transactions**")
         st.dataframe(
@@ -275,47 +330,53 @@ elif page == "Invoices (Mock)":
             hide_index=True,
         )
 
-        # auto-link leírás alapján
-        if st.button("Auto-link by description"):
-            auto_link_by_description(selected_inv, df)
-            st.success("Auto-link done (description contains invoice number).")
+        if is_admin():
+            # auto-link by description
+            if st.button("Auto-link by description"):
+                auto_link_by_description(selected_inv, df)
+                st.success("Auto-link done (description contains invoice number).")
 
-        # manuális linking
-        st.markdown("**Manual linking**")
-        candidates = df[(df["direction"] == "in") & (df["invoice_no"].isna())]
-        options = candidates["id"].astype(int).tolist()
-        chosen = st.multiselect("Pick incoming transactions to link", options)
-        if st.button("Link selected"):
-            df.loc[df["id"].isin(chosen), "invoice_no"] = selected_inv
-            st.success(f"Linked {len(chosen)} transaction(s) to {selected_inv}.")
+            # manual linking
+            st.markdown("**Manual linking**")
+            candidates = df[(df["direction"] == "in") & (df["invoice_no"].isna())]
+            options = candidates["id"].astype(int).tolist()
+            chosen = st.multiselect("Pick incoming transactions to link", options)
+            if st.button("Link selected"):
+                df.loc[df["id"].isin(chosen), "invoice_no"] = selected_inv
+                st.success(f"Linked {len(chosen)} transaction(s) to {selected_inv}.")
 
-        # unlink
-        if not linked.empty:
-            unlink_ids = st.multiselect("Unlink transactions", linked["id"].astype(int).tolist())
-            if st.button("Unlink selected"):
-                df.loc[df["id"].isin(unlink_ids), "invoice_no"] = pd.NA
-                st.success(f"Unlinked {len(unlink_ids)} transaction(s).")
+            # unlink
+            if not linked.empty:
+                unlink_ids = st.multiselect("Unlink transactions", linked["id"].astype(int).tolist())
+                if st.button("Unlink selected"):
+                    df.loc[df["id"].isin(unlink_ids), "invoice_no"] = pd.NA
+                    st.success(f"Unlinked {len(unlink_ids)} transaction(s).")
 
-        st.markdown("---")
-        st.markdown("**Status actions**")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            if st.button("Mark as issued"):
-                df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "issued"
-                st.success("Status set to issued.")
-        with col2:
-            if st.button("Mark as paid"):
-                df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "paid"
-                st.success("Status set to paid.")
-        with col3:
-            if st.button("Mark as overdue"):
-                df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "overdue"
-                st.success("Status set to overdue.")
-        with col4:
-            if st.button("Recompute status"):
-                recomputed = recompute_invoice_status(row, df)
-                df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = recomputed
-                st.success(f"Recomputed status: {recomputed}")
+            st.markdown("---")
+            st.markdown("**Status actions**")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                if st.button("Mark as issued"):
+                    df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "issued"
+                    st.success("Status set to issued.")
+            with col2:
+                if st.button("Mark as paid"):
+                    df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "paid"
+                    st.success("Status set to paid.")
+            with col3:
+                if st.button("Mark as overdue"):
+                    df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = "overdue"
+                    st.success("Status set to overdue.")
+            with col4:
+                if st.button("Recompute status"):
+                    recomputed = recompute_invoice_status(row, df)
+                    df_invoices.loc[df_invoices["invoice_no"] == selected_inv, "status"] = recomputed
+                    st.success(f"Recomputed status: {recomputed}")
+        else:
+            st.info(
+                "You can view invoices and linked transactions. "
+                "Only admin users can modify links or change invoice status."
+            )
 
 elif page == "Settings (Mock)":
     st.header("Settings")
